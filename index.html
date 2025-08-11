@@ -793,14 +793,28 @@
 
             async function renderLeaderboard() {
                 try {
-                    // Create leaderboard with current user and any real friends
+                    // Update user stats in global registry first
+                    updateGlobalUserStats();
+                    
+                    // Get fresh data from global registry for friends
+                    const globalUsers = getGlobalUserRegistry();
+                    
+                    // Create leaderboard with current user
                     const leaderboardData = [
                         { name: state.characterCustomization.name, level: state.character.level, xp: state.character.xp, isCurrentUser: true }
                     ];
 
-                    // Add friends who have joined (not just invited)
+                    // Add friends with updated stats from global registry
                     state.friends.forEach(friend => {
-                        if (friend.status === 'Joined' && friend.level) {
+                        if (friend.username && friend.status === 'Connected') {
+                            const globalUserData = globalUsers[friend.username.toLowerCase()];
+                            if (globalUserData) {
+                                // Update local friend data with latest from global registry
+                                friend.level = globalUserData.level;
+                                friend.xp = globalUserData.xp;
+                                friend.name = globalUserData.characterName;
+                            }
+                            
                             leaderboardData.push({
                                 name: friend.name,
                                 level: friend.level,
@@ -809,6 +823,9 @@
                             });
                         }
                     });
+                    
+                    // Save updated friends data
+                    saveGameState();
 
                     // Sort by level (descending), then by XP (descending)
                     leaderboardData.sort((a, b) => {
@@ -932,23 +949,79 @@
                 }
             }
 
+            // --- SHARED USER REGISTRY FUNCTIONS ---
+            function getGlobalUserRegistry() {
+                try {
+                    const registry = localStorage.getItem('productivityRPG_globalUsers');
+                    return registry ? JSON.parse(registry) : {};
+                } catch (error) {
+                    console.error('Error loading global user registry:', error);
+                    return {};
+                }
+            }
+
+            function saveToGlobalUserRegistry(username, userData) {
+                try {
+                    const registry = getGlobalUserRegistry();
+                    registry[username.toLowerCase()] = {
+                        username: username,
+                        characterName: userData.characterName,
+                        level: userData.level,
+                        xp: userData.xp,
+                        userId: userData.userId,
+                        lastActive: Date.now()
+                    };
+                    localStorage.setItem('productivityRPG_globalUsers', JSON.stringify(registry));
+                    return true;
+                } catch (error) {
+                    console.error('Error saving to global user registry:', error);
+                    return false;
+                }
+            }
+
+            function updateGlobalUserStats() {
+                if (state.username && state.isLoggedIn) {
+                    saveToGlobalUserRegistry(state.username, {
+                        characterName: state.characterCustomization.name,
+                        level: state.character.level,
+                        xp: state.character.xp,
+                        userId: state.userId
+                    });
+                }
+            }
+
             // --- AUTHORIZATION FUNCTIONS ---
             async function saveUsername(username) {
                 try {
                     loginLoader.classList.remove('hidden');
                     saveLoginBtn.disabled = true;
 
-                    // Simulate API call to check username availability
+                    // Simulate API call delay
                     await new Promise(resolve => setTimeout(resolve, 1000));
 
-                    // For demo purposes, we'll simulate some existing usernames
-                    const existingUsernames = ['alex', 'sam', 'jordan', 'casey', 'taylor'];
-                    if (existingUsernames.includes(username.toLowerCase())) {
+                    // Check if username already exists in global registry
+                    const globalUsers = getGlobalUserRegistry();
+                    if (globalUsers[username.toLowerCase()]) {
                         throw new Error('Username already taken');
                     }
 
+                    // Save username locally
                     state.username = username;
                     state.isLoggedIn = true;
+                    
+                    // Generate userId if not exists
+                    if (!state.userId) {
+                        state.userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+                    }
+                    
+                    // Register user globally
+                    saveToGlobalUserRegistry(username, {
+                        characterName: state.characterCustomization.name,
+                        level: state.character.level,
+                        xp: state.character.xp,
+                        userId: state.userId
+                    });
+                    
                     saveGameState();
 
                     showMessage("Username Saved!", `Your username "${username}" has been saved. Friends can now find you by searching for your username!`);
@@ -972,26 +1045,27 @@
                     searchLoader.classList.remove('hidden');
                     searchUserBtn.disabled = true;
 
-                    // Simulate API call to search for users
+                    // Simulate API call delay
                     await new Promise(resolve => setTimeout(resolve, 1000));
 
-                    // For demo purposes, we'll simulate some users
-                    const mockUsers = [
-                        { username: 'alex', level: 15, characterName: 'Alex' },
-                        { username: 'sam', level: 12, characterName: 'Sam' },
-                        { username: 'jordan', level: 8, characterName: 'Jordan' },
-                        { username: 'casey', level: 5, characterName: 'Casey' },
-                        { username: 'taylor', level: 3, characterName: 'Taylor' }
-                    ];
-
-                    const foundUser = mockUsers.find(user => 
-                        user.username.toLowerCase() === username.toLowerCase()
-                    );
+                    // Search in global user registry
+                    const globalUsers = getGlobalUserRegistry();
+                    const foundUser = globalUsers[username.toLowerCase()];
 
                     if (foundUser) {
+                        // Check if this is the current user
+                        if (foundUser.username.toLowerCase() === state.username?.toLowerCase()) {
+                            searchResults.innerHTML = `
+                                <div class="bg-gray-700 p-3 rounded-lg text-center">
+                                    <div class="text-gray-400">That's you! You can't add yourself as a friend.</div>
+                                </div>
+                            `;
+                            return;
+                        }
+
                         // Check if already friends
                         const isAlreadyFriend = state.friends.some(friend => 
-                            friend.username === foundUser.username
+                            friend.username?.toLowerCase() === foundUser.username.toLowerCase()
                         );
 
                         if (isAlreadyFriend) {
@@ -1014,7 +1088,7 @@
                                             <div class="font-semibold text-white">@${foundUser.username}</div>
                                             <div class="text-sm text-gray-400">Level ${foundUser.level} • ${foundUser.characterName}</div>
                                         </div>
-                                        <button onclick="addFriendByUsername('${foundUser.username}')" class="bg-green-600 hover:bg-green-700 text-white font-bold py-1 px-3 rounded text-sm transition">
+                                        <button onclick="addFriendByUsername('${foundUser.username}', '${foundUser.characterName}', ${foundUser.level}, ${foundUser.xp})" class="bg-green-600 hover:bg-green-700 text-white font-bold py-1 px-3 rounded text-sm transition">
                                             Add Friend
                                         </button>
                                     </div>
@@ -1025,6 +1099,7 @@
                         searchResults.innerHTML = `
                             <div class="bg-gray-700 p-3 rounded-lg text-center">
                                 <div class="text-gray-400">No user found with username "@${username}"</div>
+                                <div class="text-xs text-gray-500 mt-1">Make sure they have created an account and chosen a username.</div>
                             </div>
                         `;
                     }
@@ -1042,13 +1117,14 @@
                 }
             }
 
-            function addFriendByUsername(username) {
-                // Add friend to list
+            function addFriendByUsername(username, characterName, level, xp) {
+                // Add friend to list with real data
                 const newFriend = {
                     username: username,
-                    name: username.charAt(0).toUpperCase() + username.slice(1),
-                    level: 1,
-                    status: 'Added',
+                    name: characterName || username.charAt(0).toUpperCase() + username.slice(1),
+                    level: level || 1,
+                    xp: xp || 0,
+                    status: 'Connected',
                     addedAt: Date.now()
                 };
 
@@ -1056,8 +1132,11 @@
                 renderFriendsList();
                 saveGameState();
 
-                showMessage("Friend Added!", `@${username} has been added to your friends list!`);
+                showMessage("Friend Added!", `@${username} has been added to your friends list and will appear on the leaderboard!`);
                 searchModal.classList.add('hidden');
+                
+                // Refresh leaderboard to show new friend
+                renderLeaderboard();
             }
 
             async function levelUp() {
@@ -1680,6 +1759,9 @@
                 }
             });
 
+            // Make functions globally available for onclick handlers
+            window.addFriendByUsername = addFriendByUsername;
+            
             // --- INITIALIZATION ---
             // Load saved game state first
             const hasLoadedState = loadGameState();
